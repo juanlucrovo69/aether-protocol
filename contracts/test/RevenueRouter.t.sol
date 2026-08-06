@@ -6,19 +6,13 @@ import {RevenueRouter} from "../src/RevenueRouter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-// Simple mock ERC20 for testing
 contract MockERC20 is ERC20 {
     constructor() ERC20("Mock Fee Token", "FEE") {}
-
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
+    function mint(address to, uint256 amount) external { _mint(to, amount); }
 }
 
-// Mock destinations that just accept tokens
 contract MockBuyback {
     mapping(address => uint256) public received;
-
     function receiveFunds(address token, uint256 amount) external {
         IERC20(token).transferFrom(msg.sender, address(this), amount);
         received[token] += amount;
@@ -27,7 +21,6 @@ contract MockBuyback {
 
 contract MockYieldPool {
     mapping(address => uint256) public received;
-
     function receiveFunds(address token, uint256 amount) external {
         IERC20(token).transferFrom(msg.sender, address(this), amount);
         received[token] += amount;
@@ -42,17 +35,13 @@ contract RevenueRouterTest is Test {
 
     address owner = address(this);
     address alice = address(0xA11CE);
-
     uint256 constant AMOUNT = 10_000e18;
 
     function setUp() public {
         feeToken = new MockERC20();
         buyback = new MockBuyback();
         yieldPool = new MockYieldPool();
-
         router = new RevenueRouter(owner, address(buyback), address(yieldPool));
-
-        // Mint fee tokens to alice
         feeToken.mint(alice, AMOUNT);
     }
 
@@ -67,8 +56,8 @@ contract RevenueRouterTest is Test {
         router.routeRevenue(address(feeToken), AMOUNT);
         vm.stopPrank();
 
-        uint256 expectedBuyback = (AMOUNT * 8000) / 10000; // 80%
-        uint256 expectedYield = AMOUNT - expectedBuyback;  // 20%
+        uint256 expectedBuyback = (AMOUNT * 8000) / 10000;
+        uint256 expectedYield = AMOUNT - expectedBuyback;
 
         assertEq(buyback.received(address(feeToken)), expectedBuyback);
         assertEq(yieldPool.received(address(feeToken)), expectedYield);
@@ -85,14 +74,13 @@ contract RevenueRouterTest is Test {
 
     function test_RouteRevenueRevertsWithoutApproval() public {
         vm.prank(alice);
-        vm.expectRevert(); // SafeERC20 will revert
+        vm.expectRevert();
         router.routeRevenue(address(feeToken), AMOUNT);
     }
 
     function test_SetDestinationsOnlyOwner() public {
         MockBuyback newBuyback = new MockBuyback();
         MockYieldPool newYield = new MockYieldPool();
-
         router.setDestinations(address(newBuyback), address(newYield));
         assertEq(router.buybackAndBurn(), address(newBuyback));
         assertEq(router.realYieldPool(), address(newYield));
@@ -105,9 +93,7 @@ contract RevenueRouterTest is Test {
     }
 
     function test_EmergencyWithdraw() public {
-        // Send some tokens directly to router
         feeToken.mint(address(router), 1000e18);
-
         router.emergencyWithdraw(address(feeToken), alice, 1000e18);
         assertEq(feeToken.balanceOf(alice), AMOUNT + 1000e18);
     }
@@ -116,5 +102,37 @@ contract RevenueRouterTest is Test {
         assertEq(router.BUYBACK_BPS(), 8000);
         assertEq(router.YIELD_BPS(), 2000);
         assertEq(router.BPS_DENOMINATOR(), 10000);
+    }
+
+    // ==================== FUZZ TESTS ====================
+
+    function testFuzz_RouteRevenueSplit(uint256 amount) public {
+        amount = bound(amount, 1, 1_000_000_000e18);
+        feeToken.mint(alice, amount);
+
+        vm.startPrank(alice);
+        feeToken.approve(address(router), amount);
+        router.routeRevenue(address(feeToken), amount);
+        vm.stopPrank();
+
+        uint256 expectedBuyback = (amount * 8000) / 10000;
+        uint256 expectedYield = amount - expectedBuyback;
+
+        assertEq(buyback.received(address(feeToken)), expectedBuyback);
+        assertEq(yieldPool.received(address(feeToken)), expectedYield);
+        assertEq(feeToken.balanceOf(address(router)), 0);
+    }
+
+    function testFuzz_RouteRevenueNeverLosesDust(uint256 amount) public {
+        amount = bound(amount, 1, 1_000_000e18);
+        feeToken.mint(alice, amount);
+
+        vm.startPrank(alice);
+        feeToken.approve(address(router), amount);
+        router.routeRevenue(address(feeToken), amount);
+        vm.stopPrank();
+
+        uint256 totalReceived = buyback.received(address(feeToken)) + yieldPool.received(address(feeToken));
+        assertEq(totalReceived, amount);
     }
 }
