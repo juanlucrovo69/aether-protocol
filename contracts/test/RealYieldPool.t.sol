@@ -10,9 +10,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract MockYieldToken is ERC20 {
     constructor() ERC20("Mock Yield", "YLD") {}
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
+    function mint(address to, uint256 amount) external { _mint(to, amount); }
 }
 
 contract RealYieldPoolTest is Test {
@@ -103,14 +101,12 @@ contract RealYieldPoolTest is Test {
 
         vm.prank(alice);
         pool.claim(1, address(yieldToken));
-
         assertEq(pool.claimable(1, alice, address(yieldToken)), 0);
     }
 
     function test_StartEpochRevertsIfNoVotingPower() public {
         veAether emptyVe = new veAether(address(aether));
         RealYieldPool emptyPool = new RealYieldPool(owner, address(emptyVe));
-
         vm.expectRevert("No voting power");
         emptyPool.startEpoch();
     }
@@ -118,5 +114,64 @@ contract RealYieldPoolTest is Test {
     function test_EmergencyWithdraw() public {
         pool.emergencyWithdraw(address(yieldToken), alice, YIELD_AMOUNT);
         assertEq(yieldToken.balanceOf(alice), YIELD_AMOUNT);
+    }
+
+    // ==================== FUZZ TESTS ====================
+
+    function testFuzz_ReceiveFunds(uint256 amount) public {
+        amount = bound(amount, 1, 10_000_000e18);
+        MockYieldToken freshToken = new MockYieldToken();
+        freshToken.mint(address(this), amount);
+        freshToken.approve(address(pool), amount);
+        pool.receiveFunds(address(freshToken), amount);
+        assertEq(pool.pendingFunds(address(freshToken)), amount);
+    }
+
+    function testFuzz_ProportionalClaim(uint256 aliceLock, uint256 bobLock, uint256 yieldAmt) public {
+        aliceLock = bound(aliceLock, 1e18, 1_000_000e18);
+        bobLock = bound(bobLock, 1e18, 1_000_000e18);
+        yieldAmt = bound(yieldAmt, 1e18, 100_000e18);
+
+        AetherToken freshAether = new AetherToken(owner);
+        veAether freshVe = new veAether(address(freshAether));
+        RealYieldPool freshPool = new RealYieldPool(owner, address(freshVe));
+        MockYieldToken freshYield = new MockYieldToken();
+
+        freshAether.transfer(alice, aliceLock);
+        freshAether.transfer(bob, bobLock);
+
+        vm.startPrank(alice);
+        freshAether.approve(address(freshVe), aliceLock);
+        freshVe.createLock(aliceLock, block.timestamp + 1460 days);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        freshAether.approve(address(freshVe), bobLock);
+        freshVe.createLock(bobLock, block.timestamp + 1460 days);
+        vm.stopPrank();
+
+        freshYield.mint(address(this), yieldAmt);
+        freshYield.approve(address(freshPool), yieldAmt);
+        freshPool.receiveFunds(address(freshYield), yieldAmt);
+
+        freshPool.startEpoch();
+        freshPool.allocateToCurrentEpoch(address(freshYield));
+
+        uint256 alicePower = freshVe.getVotingPower(alice);
+        uint256 bobPower = freshVe.getVotingPower(bob);
+        uint256 totalPower = alicePower + bobPower;
+
+        uint256 expectedAlice = (yieldAmt * alicePower) / totalPower;
+        uint256 expectedBob = (yieldAmt * bobPower) / totalPower;
+
+        vm.prank(alice);
+        freshPool.claim(1, address(freshYield));
+        assertEq(freshYield.balanceOf(alice), expectedAlice);
+
+        vm.prank(bob);
+        freshPool.claim(1, address(freshYield));
+        assertEq(freshYield.balanceOf(bob), expectedBob);
+
+        assertLe(freshYield.balanceOf(alice) + freshYield.balanceOf(bob), yieldAmt);
     }
 }
